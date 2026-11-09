@@ -1,0 +1,169 @@
+pipeline {
+  agent any
+
+  environment {
+    NODE_VERSION = '22'
+    APP_DIR = 'smart-recruit-backend'
+    FRONTEND_DIR = 'smart-recruit-frontend'
+    REGISTRY = 'registry.example.com'
+    IMAGE_TAG = "${env.BUILD_NUMBER}"
+    BACKEND_IMAGE = "${REGISTRY}/smart-recruit-backend:${IMAGE_TAG}"
+    FRONTEND_IMAGE = "${REGISTRY}/smart-recruit-frontend:${IMAGE_TAG}"
+    STACK_NAME = 'smart-recruit'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        sh 'git rev-parse --short HEAD'
+      }
+    }
+
+    stage('Install') {
+      steps {
+        sh '''
+          npm ci --prefix smart-recruit-backend
+          npm ci --prefix smart-recruit-frontend
+        '''
+      }
+    }
+
+    stage('Lint') {
+      parallel {
+        stage('Backend Lint') {
+          steps {
+            sh 'npm run lint --prefix smart-recruit-backend'
+          }
+        }
+        stage('Frontend Lint') {
+          steps {
+            sh 'npm run lint --prefix smart-recruit-frontend'
+          }
+        }
+      }
+    }
+
+    stage('Unit Tests') {
+      steps {
+        sh '''
+          npm test --prefix smart-recruit-backend -- --ci --runInBand
+          npm test --prefix smart-recruit-frontend -- --ci --runInBand
+        '''
+      }
+    }
+
+    stage('SonarQube Scan') {
+      steps {
+        withSonarQubeEnv('sonarqube') {
+          sh '''
+            sonar-scanner \
+              -Dsonar.projectKey=smart-recruit \
+              -Dsonar.projectName='Smart Recruit' \
+              -Dsonar.sources=. \
+              -Dsonar.exclusions='**/node_modules/**,**/dist/**,**/coverage/**,**/docker/**' \
+              -Dsonar.javascript.lcov.reportPaths='smart-recruit-frontend/coverage/lcov.info,smart-recruit-backend/coverage/lcov.info'
+          '''
+        }
+      }
+    }
+
+    stage('Build Image') {
+      steps {
+        sh '''
+          docker build -t ${BACKEND_IMAGE} -f smart-recruit-backend/Dockerfile ./smart-recruit-backend
+          docker build -t ${FRONTEND_IMAGE} -f smart-recruit-frontend/Dockerfile ./smart-recruit-frontend
+        '''
+      }
+    }
+
+    stage('Trivy Scan') {
+      steps {
+        sh '''
+          trivy image --severity HIGH,CRITICAL ${BACKEND_IMAGE}
+          trivy image --severity HIGH,CRITICAL ${FRONTEND_IMAGE}
+        '''
+      }
+    }
+
+    stage('Push to Registry') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-credentials', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASSWORD')]) {
+          sh '''
+            echo "$REGISTRY_PASSWORD" | docker login ${REGISTRY} -u "$REGISTRY_USER" --password-stdin
+            docker push ${BACKEND_IMAGE}
+            docker push ${FRONTEND_IMAGE}
+          '''
+        }
+      }
+    }
+
+    stage('Deploy to Staging') {
+      steps {
+        sh '''
+          ansible-playbook -i infra/ansible/inventories/staging/hosts.yml \
+            infra/ansible/playbooks/deploy-stack.yml \
+            --extra-vars "image_tag=${IMAGE_TAG} env=staging"
+        '''
+      }
+    }
+
+    stage('Smoke Test') {
+      steps {
+        sh '''
+          for i in {1..12}; do
+            if curl -fsS http://staging.example.com/health >/dev/null; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Smoke test failed for staging" >&2
+          exit 1
+        '''
+      }
+    }
+
+    stage('Manual Approval') {
+      steps {
+        input message: 'Approve production deployment?', ok: 'Deploy', submitter: 'ops-team'
+      }
+    }
+
+    stage('Deploy to Production') {
+      steps {
+        sh '''
+          ansible-playbook -i infra/ansible/inventories/production/hosts.yml \
+            infra/ansible/playbooks/deploy-stack.yml \
+            --extra-vars "image_tag=${IMAGE_TAG} env=production"
+        '''
+      }
+    }
+
+    stage('Automatic Rollback') {
+      steps {
+        script {
+          def healthOk = sh(
+            script: 'curl -fsS http://prod.example.com/health >/dev/null || exit 1',
+            returnStatus: true
+          )
+
+          if (healthOk != 0) {
+            echo 'Production health check failed; rolling back the stack.'
+            sh 'docker service rollback ${STACK_NAME}_backend || true'
+            sh 'docker service rollback ${STACK_NAME}_frontend || true'
+            error 'Production health check failed. Rollback executed.'
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      junit allowEmptyResults: true, testResults: '**/coverage/junit.xml'
+    }
+    failure {
+      echo 'Pipeline failed; inspect the logs for remediation steps.'
+    }
+  }
+}

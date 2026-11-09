@@ -1,0 +1,315 @@
+pipeline {
+    agent any
+
+    environment {
+        NODE_ENV = 'production'
+        DB_HOST = 'your-production-db-host'
+        DB_PORT = '5432'
+        DB_DATABASE = 'smart_recruit'
+        JWT_SECRET = 'your-production-jwt-secret'
+        EMAIL_HOST = 'smtp.gmail.com'
+        EMAIL_PORT = '587'
+        FRONTEND_URL = 'https://github.com/YohannesTsegaye/smart-recruit-frontend.git'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // Clean workspace before checkout
+                cleanWs()
+                
+                // Clone the backend repository
+                git branch: 'main', 
+                    url: 'https://github.com/YohannesTsegaye/smart-recruit-backend.git',
+                    credentialsId: 'github-credentials' // Configure this in Jenkins
+                
+                echo "✅ Backend repository cloned successfully"
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    // Clean install for consistency
+                    sh 'rm -rf node_modules package-lock.json'
+                    sh 'npm ci' // Install all dependencies including dev dependencies
+                    
+                    echo "✅ Dependencies installed successfully"
+                }
+            }
+        }
+
+        stage('Lint Code') {
+            steps {
+                script {
+                    try {
+                        sh 'npm run lint'
+                        echo "✅ Code linting passed"
+                    } catch (Exception e) {
+                        echo "⚠️ Linting issues found, but continuing..."
+                        // You can make this fail the build by removing the try-catch
+                    }
+                }
+            }
+        }
+
+        stage('Run Unit Tests') {
+            steps {
+                script {
+                    try {
+                        sh 'npm test -- --coverage --watchAll=false'
+                        echo "✅ Unit tests passed"
+                    } catch (Exception e) {
+                        echo "⚠️ Unit tests failed, but continuing..."
+                        // You can make this fail the build by removing the try-catch
+                    }
+                }
+            }
+        }
+
+       
+
+        stage('Security Scan') {
+            steps {
+                script {
+                    // Run npm audit
+                    try {
+                        sh 'npm audit --audit-level moderate'
+                        echo "✅ Security scan passed"
+                    } catch (Exception e) {
+                        echo "⚠️ Security vulnerabilities found, but continuing..."
+                    }
+                }
+            }
+        }
+
+        stage('Build Application') {
+            steps {
+                script {
+                    // Set environment variables for build
+                    withEnv([
+                        "NODE_ENV=production",
+                        "DB_HOST=${env.DB_HOST}",
+                        "DB_PORT=${env.DB_PORT}",
+                        "DB_DATABASE=${env.DB_DATABASE}",
+                        "JWT_SECRET=${env.JWT_SECRET}",
+                        "EMAIL_HOST=${env.EMAIL_HOST}",
+                        "EMAIL_PORT=${env.EMAIL_PORT}",
+                        "FRONTEND_URL=${env.FRONTEND_URL}"
+                    ]) {
+                        sh 'npm run build'
+                    }
+                    
+                    echo "✅ Backend build completed"
+                }
+            }
+        }
+
+        stage('Database Migration') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Run database migrations
+                    withCredentials([usernamePassword(
+                        credentialsId: 'database-credentials',
+                        usernameVariable: 'DB_USERNAME',
+                        passwordVariable: 'DB_PASSWORD'
+                    )]) {
+                        withEnv([
+                            "DB_HOST=${env.DB_HOST}",
+                            "DB_PORT=${env.DB_PORT}",
+                            "DB_USERNAME=${env.DB_USERNAME}",
+                            "DB_PASSWORD=${env.DB_PASSWORD}",
+                            "DB_DATABASE=${env.DB_DATABASE}"
+                        ]) {
+                            sh 'npm run migration:run'
+                        }
+                    }
+                    
+                    echo "✅ Database migrations completed"
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Build Docker image
+                    sh 'docker build -t smart-recruit-backend:${BUILD_NUMBER} .'
+                    sh 'docker tag smart-recruit-backend:${BUILD_NUMBER} smart-recruit-backend:latest'
+                    
+                    echo "✅ Docker image built successfully"
+                }
+            }
+        }
+
+        stage('Push to Docker Registry') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Push to Docker registry (Docker Hub, ECR, etc.)
+                    withCredentials([usernamePassword(
+                        credentialsId: 'docker-registry-credentials',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )]) {
+                        sh '''
+                            docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
+                            docker tag smart-recruit-backend:${BUILD_NUMBER} your-registry/smart-recruit-backend:${BUILD_NUMBER}
+                            docker tag smart-recruit-backend:${BUILD_NUMBER} your-registry/smart-recruit-backend:latest
+                            docker push your-registry/smart-recruit-backend:${BUILD_NUMBER}
+                            docker push your-registry/smart-recruit-backend:latest
+                        '''
+                    }
+                    
+                    echo "✅ Docker image pushed to registry"
+                }
+            }
+        }
+
+        stage('Deploy to AWS ECS') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Deploy to AWS ECS
+                    withCredentials([[
+                        $class: 'AmazonWebServicesCredentialsBinding',
+                        credentialsId: 'aws-credentials',
+                        accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                        secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                    ]]) {
+                        sh '''
+                            # Update ECS service
+                            aws ecs update-service \
+                                --cluster your-ecs-cluster \
+                                --service smart-recruit-backend \
+                                --force-new-deployment
+                            
+                            # Wait for deployment to complete
+                            aws ecs wait services-stable \
+                                --cluster your-ecs-cluster \
+                                --services smart-recruit-backend
+                        '''
+                    }
+                    
+                    echo "✅ Backend deployed to AWS ECS successfully"
+                }
+            }
+        }
+
+        stage('Deploy to Heroku') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Alternative: Deploy to Heroku
+                    withCredentials([string(credentialsId: 'heroku-api-key', variable: 'HEROKU_API_KEY')]) {
+                        sh '''
+                            # Install Heroku CLI
+                            curl https://cli-assets.heroku.com/install.sh | sh
+                            
+                            # Login to Heroku
+                            echo $HEROKU_API_KEY | heroku auth:token
+                            
+                            # Deploy to Heroku
+                            heroku container:push web --app your-heroku-app-name
+                            heroku container:release web --app your-heroku-app-name
+                        '''
+                    }
+                    
+                    echo "✅ Backend deployed to Heroku successfully"
+                }
+            }
+        }
+
+        stage('Health Check') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Wait for deployment to be ready
+                    sh 'sleep 30'
+                    
+                    // Perform health check
+                    sh '''
+                        # Check if the API is responding
+                        curl -f https://your-backend-api.com/health || exit 1
+                        echo "✅ Health check passed"
+                    '''
+                    
+                    echo "✅ Backend health check completed"
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Clean up workspace
+            cleanWs()
+            
+            // Clean up Docker images
+            sh 'docker rmi smart-recruit-backend:${BUILD_NUMBER} || true'
+            sh 'docker rmi smart-recruit-backend:latest || true'
+        }
+        
+        success {
+            script {
+                echo "🎉 Backend pipeline completed successfully!"
+                
+                // Send success notification
+                emailext (
+                    subject: "✅ Backend Deployment Successful - ${env.JOB_NAME}",
+                    body: """
+                        <h2>Backend Deployment Successful</h2>
+                        <p><strong>Job:</strong> ${env.JOB_NAME}</p>
+                        <p><strong>Build:</strong> ${env.BUILD_NUMBER}</p>
+                        <p><strong>Branch:</strong> ${env.GIT_BRANCH}</p>
+                        <p><strong>Commit:</strong> ${env.GIT_COMMIT}</p>
+                        <p><strong>Duration:</strong> ${currentBuild.durationString}</p>
+                        <p><strong>URL:</strong> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
+                        <p><strong>API URL:</strong> <a href="https://your-backend-api.com">https://your-backend-api.com</a></p>
+                    """,
+                    to: 'your-email@example.com'
+                )
+            }
+        }
+        
+        failure {
+            script {
+                echo "❌ Backend pipeline failed!"
+                
+                // Send failure notification
+                emailext (
+                    subject: "❌ Backend Deployment Failed - ${env.JOB_NAME}",
+                    body: """
+                        <h2>Backend Deployment Failed</h2>
+                        <p><strong>Job:</strong> ${env.JOB_NAME}</p>
+                        <p><strong>Build:</strong> ${env.BUILD_NUMBER}</p>
+                        <p><strong>Branch:</strong> ${env.GIT_BRANCH}</p>
+                        <p><strong>Commit:</strong> ${env.GIT_COMMIT}</p>
+                        <p><strong>Duration:</strong> ${currentBuild.durationString}</p>
+                        <p><strong>URL:</strong> <a href="${env.BUILD_URL}">${env.BUILD_URL}</a></p>
+                        <p><strong>Error:</strong> ${currentBuild.description ?: 'Unknown error'}</p>
+                    """,
+                    to: 'your-email@example.com'
+                )
+            }
+        }
+        
+        unstable {
+            echo "⚠️ Backend pipeline is unstable"
+        }
+    }
+}

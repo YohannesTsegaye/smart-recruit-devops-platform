@@ -1,0 +1,29 @@
+groups:
+  - name: smart-recruit.rules
+    rules:
+      - alert: AppDown
+        expr: up{job="smart-recruit-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Smart Recruit backend is down'
+          description: 'The backend has been unreachable for more than 2 minutes.'
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status_code=~"5.."}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'High error rate detected'
+          description: 'The API is returning a lot of 5xx responses.'
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'High CPU usage'
+          description: 'Average CPU usage is above 80% for 10 minutes.'

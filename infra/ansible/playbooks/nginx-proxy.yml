@@ -1,0 +1,67 @@
+---
+- name: Configure Nginx reverse proxy with TLS
+  hosts: web
+  become: true
+  vars:
+    site_name: smart-recruit
+    ssl_cert_path: /etc/letsencrypt/live/{{ site_name }}.example.com/fullchain.pem
+    ssl_key_path: /etc/letsencrypt/live/{{ site_name }}.example.com/privkey.pem
+  tasks:
+    - name: install NGINX
+      apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Ensure certbot is installed
+      apt:
+        name: certbot
+        state: present
+
+    - name: Create NGINX config for app
+      copy:
+        dest: /etc/nginx/sites-available/{{ site_name }}
+        content: |
+          server {
+              listen 80;
+              server_name {{ site_name }}.example.com;
+
+              location / {
+                  proxy_pass http://127.0.0.1:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+
+          server {
+              listen 443 ssl;
+              server_name {{ site_name }}.example.com;
+              ssl_certificate {{ ssl_cert_path }};
+              ssl_certificate_key {{ ssl_key_path }};
+
+              location / {
+                  proxy_pass http://127.0.0.1:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+      notify: reload nginx
+
+    - name: Enable site
+      file:
+        src: /etc/nginx/sites-available/{{ site_name }}
+        dest: /etc/nginx/sites-enabled/{{ site_name }}
+        state: link
+
+    - name: Remove default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded

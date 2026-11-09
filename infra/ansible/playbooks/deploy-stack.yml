@@ -1,0 +1,30 @@
+---
+- name: Deploy Smart Recruit application stack
+  hosts: docker_swarm_managers
+  become: true
+  vars:
+    stack_file: /opt/smart-recruit/docker/swarm-stack.yml
+    image_tag: latest
+    environment: staging
+  tasks:
+    - name: Ensure app directory exists
+      file:
+        path: /opt/smart-recruit
+        state: directory
+        mode: '0755'
+
+    - name: Copy stack file to remote hosts
+      copy:
+        src: ../../docker/swarm-stack.yml
+        dest: "{{ stack_file }}"
+        mode: '0644'
+
+    - name: Deploy stack
+      command: >
+        docker stack deploy --compose-file {{ stack_file }} --prune {{ environment }}
+      environment:
+        REGISTRY: registry.example.com
+        IMAGE_TAG: "{{ image_tag }}"
+        POSTGRES_USER: smart_recruit
+        POSTGRES_DB: smart_recruit
+        FRONTEND_URL: "https://{{ environment }}.example.com"

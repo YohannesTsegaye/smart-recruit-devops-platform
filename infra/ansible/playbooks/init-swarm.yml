@@ -1,0 +1,25 @@
+---
+- name: Initialize Docker Swarm
+  hosts: docker_swarm_managers
+  become: true
+  tasks:
+    - name: Check swarm membership
+      command: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %}'
+      register: swarm_state
+      changed_when: false
+      failed_when: false
+
+    - name: Initialize swarm if not already initialized
+      command: docker swarm init --advertise-addr {{ ansible_default_ipv4.address }}
+      when: swarm_state.stdout != 'active'
+
+    - name: Get manager join token
+      command: docker swarm join-token -q manager
+      register: manager_token
+      when: swarm_state.stdout == 'active'
+      changed_when: false
+
+    - name: Set fact for manager token
+      set_fact:
+        swarm_manager_token: "{{ manager_token.stdout }}"
+      when: swarm_state.stdout == 'active'

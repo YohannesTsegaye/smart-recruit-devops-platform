@@ -1,0 +1,21 @@
+---
+ansible_user: ubuntu
+ansible_become: true
+
+app_name: smart-recruit
+app_port: 5000
+frontend_port: 8080
+app_user: appuser
+docker_version: '27.4.0'
+nginx_sites_enabled: /etc/nginx/sites-enabled
+nginx_server_name: "_"
+certbot_email: ops@example.com
+
+auth_token: "{{ lookup('env', 'VAULT_TOKEN') | default('replace-me', true) }}"
+stack_registry: registry.example.com
+stack_image_tag: latest
+
+postgres_db: smart_recruit
+postgres_user: smart_recruit
+postgres_password: "{{ lookup('env', 'POSTGRES_PASSWORD') | default('change-me', true) }}"
+jwt_secret: "{{ lookup('env', 'JWT_SECRET') | default('change-me', true) }}"
